@@ -405,6 +405,45 @@ app.get('/queue', (req, res) => {
   res.json({ queue });
 });
 
+// Recent webhook activity log (in-memory, last 10 webhooks)
+const recentWebhooks = [];
+const MAX_WEBHOOK_LOG = 10;
+
+function logWebhookActivity(data) {
+  recentWebhooks.unshift({
+    timestamp: new Date().toISOString(),
+    ...data
+  });
+  if (recentWebhooks.length > MAX_WEBHOOK_LOG) {
+    recentWebhooks.pop();
+  }
+}
+
+// Inject webhook logging into the webhook handler
+app.use('/vapi/*', (req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = function(data) {
+    logWebhookActivity({
+      method: req.method,
+      path: req.path,
+      eventType: req.body?.message?.type || 'unknown',
+      hasEndedAt: !!req.body?.endedAt,
+      customerNumber: req.body?.customer?.number || req.body?.call?.customer?.number,
+      response: data
+    });
+    return originalJson(data);
+  };
+  next();
+});
+
+// View recent webhook activity
+app.get('/webhook-log', (req, res) => {
+  res.json({
+    count: recentWebhooks.length,
+    webhooks: recentWebhooks
+  });
+});
+
 const PORT = process.env.PORT || 3100;
 app.listen(PORT, () => {
   console.log(`🚀 Vapi Follow-up Bot listening on port ${PORT}`);
