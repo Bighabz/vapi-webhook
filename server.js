@@ -48,18 +48,22 @@ async function sendSMS(to, message) {
 
 // Handle call-ended event
 async function handleCallEnded(vapiPayload, res) {
+  console.log('🎯 handleCallEnded() called');
+  
   // Log the call
   await logCall(vapiPayload);
   
   // Parse call data
   const callInfo = parseCallData(vapiPayload);
-  console.log('📊 Parsed call info:', callInfo);
+  console.log('📊 Parsed call info:', JSON.stringify(callInfo, null, 2));
   
   // If no phone number, can't follow up
   if (!callInfo.phone) {
     console.log('⚠️  No phone number found - skipping follow-up');
     return res.json({ success: true, message: 'No phone number to follow up with' });
   }
+  
+  console.log(`✅ Found phone number: ${callInfo.phone}`);
   
   // Schedule 1-hour follow-up
   const oneHourKey = `${callInfo.callId}-1h`;
@@ -69,6 +73,7 @@ async function handleCallEnded(vapiPayload, res) {
     scheduledFor: Date.now() + (60 * 60 * 1000), // 1 hour
     sent: false
   });
+  console.log(`⏰ Scheduled 1-hour follow-up: ${oneHourKey}`);
   
   // Schedule 24-hour follow-up
   const oneDayKey = `${callInfo.callId}-24h`;
@@ -78,23 +83,37 @@ async function handleCallEnded(vapiPayload, res) {
     scheduledFor: Date.now() + (24 * 60 * 60 * 1000), // 24 hours
     sent: false
   });
+  console.log(`⏰ Scheduled 24-hour follow-up: ${oneDayKey}`);
   
-  // Notify Habib about the call (optional)
+  // Notify Habib about the call (THIS IS THE KEY PART!)
   const notifyHabib = process.env.NOTIFY_HABIB_PHONE;
+  console.log(`🔔 NOTIFY_HABIB_PHONE env var: ${notifyHabib ? '✅ ' + notifyHabib : '❌ NOT SET'}`);
+  
   if (notifyHabib) {
     const summary = `📞 Call Ended\n\nFrom: ${callInfo.phone}${callInfo.name ? `\nName: ${callInfo.name}` : ''}${callInfo.businessType ? `\nBusiness: ${callInfo.businessType}` : ''}\nDuration: ${callInfo.duration}s${callInfo.painPoints.length > 0 ? `\n\nPain points:\n- ${callInfo.painPoints.join('\n- ')}` : ''}\n\n✅ Follow-ups scheduled`;
     
+    console.log(`📤 Sending notification to Habib at ${notifyHabib}...`);
+    console.log(`📝 Message preview: ${summary.slice(0, 100)}...`);
+    
     setTimeout(() => {
-      sendSMS(notifyHabib, summary).catch(err => {
-        console.error('Failed to notify Habib:', err);
-      });
+      sendSMS(notifyHabib, summary)
+        .then(result => {
+          console.log(`✅ Successfully sent notification to Habib! SID: ${result.sid}`);
+        })
+        .catch(err => {
+          console.error('❌ Failed to notify Habib:', err.message);
+          console.error('   Full error:', err);
+        });
     }, 1000);
+  } else {
+    console.error('❌ CRITICAL: NOTIFY_HABIB_PHONE is not set! Cannot send notification.');
   }
   
   return res.json({
     success: true,
     message: 'Follow-ups scheduled',
-    scheduledCount: 2
+    scheduledCount: 2,
+    notificationSent: !!notifyHabib
   });
 }
 
@@ -198,45 +217,70 @@ function get24HourFollowUp(info) {
 
 // General webhook endpoint for all Vapi events
 app.post('/vapi/webhook', async (req, res) => {
-  console.log('📞 Received webhook from Vapi');
+  console.log('📞 ========== WEBHOOK RECEIVED ==========');
+  console.log('⏰ Timestamp:', new Date().toISOString());
   
   try {
     const vapiPayload = req.body;
-    const eventType = vapiPayload.message?.type || 'unknown';
+    console.log('📦 Full payload keys:', Object.keys(vapiPayload));
     
-    console.log(`   Event type: ${eventType}`);
+    const eventType = vapiPayload.message?.type || 'unknown';
+    console.log(`🏷️  Event type: ${eventType}`);
+    
+    // Log important fields
+    if (vapiPayload.call) {
+      console.log('📞 Call info:', {
+        id: vapiPayload.call.id,
+        status: vapiPayload.call.status,
+        customerNumber: vapiPayload.call.customer?.number
+      });
+    }
+    
+    if (vapiPayload.endedAt) {
+      console.log('🛑 Call ended at:', vapiPayload.endedAt);
+    }
     
     // Handle call-started event - send SMS immediately
     if (eventType === 'status-update' && vapiPayload.message?.status === 'in-progress') {
-      console.log('🚀 Call started - sending immediate SMS with calendar link');
+      console.log('🚀 ===== CALL STARTED EVENT =====');
       
       const callerPhone = vapiPayload.call?.customer?.number;
+      console.log(`📱 Caller phone: ${callerPhone || '❌ NOT FOUND'}`);
+      
       if (callerPhone) {
         const message = `📅 Hey! While we're chatting, here's my calendar link so you can book your free consultation:\n\n${CALENDAR_LINK}\n\nOr text me directly: ${HABIB_CONTACT}\n\n- Habib`;
         
+        console.log('📤 Queueing immediate SMS to caller...');
         // Send immediately (no delay)
         setTimeout(() => {
-          sendSMS(callerPhone, message).catch(err => {
-            console.error('Failed to send immediate SMS:', err);
-          });
+          sendSMS(callerPhone, message)
+            .then(result => console.log('✅ Immediate SMS sent:', result.sid))
+            .catch(err => console.error('❌ Failed to send immediate SMS:', err));
         }, 2000); // 2 seconds into call
       }
       
+      console.log('========================================');
       return res.json({ success: true, message: 'Call started - SMS queued' });
     }
     
     // Handle call-ended event - original follow-up logic
     if (eventType === 'end-of-call-report' || vapiPayload.endedAt) {
-      console.log('📞 Call ended - processing follow-up');
-      return await handleCallEnded(vapiPayload, res);
+      console.log('🛑 ===== CALL ENDED EVENT =====');
+      const result = await handleCallEnded(vapiPayload, res);
+      console.log('========================================');
+      return result;
     }
     
     // Unknown event type
     console.log('⚠️  Unknown event type, ignoring');
+    console.log('========================================');
     return res.json({ success: true, message: 'Event received' });
     
   } catch (error) {
-    console.error('❌ Error processing webhook:', error);
+    console.error('❌ ===== ERROR IN WEBHOOK =====');
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    console.log('========================================');
     return res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -282,6 +326,71 @@ app.get('/health', (req, res) => {
     queueSize: followUpQueue.size,
     timestamp: new Date().toISOString()
   });
+});
+
+// Debug endpoint - show environment variables (sanitized)
+app.get('/debug-env', (req, res) => {
+  const sanitize = (str) => {
+    if (!str) return '❌ NOT SET';
+    if (str.length < 8) return '✅ SET (hidden)';
+    return `✅ ${str.slice(0, 4)}...${str.slice(-4)}`;
+  };
+  
+  const envStatus = {
+    TWILIO_ACCOUNT_SID: sanitize(process.env.TWILIO_ACCOUNT_SID),
+    TWILIO_AUTH_TOKEN: sanitize(process.env.TWILIO_AUTH_TOKEN),
+    TWILIO_PHONE_NUMBER: process.env.TWILIO_PHONE_NUMBER || '❌ NOT SET',
+    NOTIFY_HABIB_PHONE: process.env.NOTIFY_HABIB_PHONE || '❌ NOT SET',
+    HABIB_CONTACT: process.env.HABIB_CONTACT || '❌ NOT SET',
+    CALENDAR_LINK: process.env.CALENDAR_LINK ? '✅ SET' : '❌ NOT SET',
+    PORT: process.env.PORT || '3100',
+    NODE_ENV: process.env.NODE_ENV || 'not set'
+  };
+  
+  console.log('🔍 Debug env check requested:', envStatus);
+  
+  res.json({
+    timestamp: new Date().toISOString(),
+    environment: envStatus,
+    twilioClientInitialized: !!twilioClient,
+    fromNumber: FROM_NUMBER
+  });
+});
+
+// Test SMS endpoint - send a test SMS to Habib
+app.post('/test-sms', async (req, res) => {
+  const targetPhone = req.body.phone || process.env.NOTIFY_HABIB_PHONE;
+  
+  if (!targetPhone) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'No phone number provided. Send { "phone": "+1234567890" } or set NOTIFY_HABIB_PHONE' 
+    });
+  }
+  
+  console.log(`🧪 Test SMS requested to: ${targetPhone}`);
+  
+  try {
+    const message = `🧪 TEST MESSAGE from Vapi Webhook\n\nTimestamp: ${new Date().toISOString()}\n\nIf you're seeing this, Twilio is working! ✅`;
+    
+    const result = await sendSMS(targetPhone, message);
+    
+    res.json({
+      success: true,
+      messageSid: result.sid,
+      to: targetPhone,
+      from: FROM_NUMBER,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('❌ Test SMS failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      code: error.code,
+      moreInfo: error.moreInfo
+    });
+  }
 });
 
 // Queue status endpoint
